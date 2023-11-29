@@ -1,14 +1,25 @@
+import { CustomAuthorizerEvent, CustomAuthorizerResult } from 'aws-lambda'
+import 'source-map-support/register'
+
+import { verify, decode } from 'jsonwebtoken'
+import { createLogger } from '../../utils/logger'
 import Axios from 'axios'
-import jsonwebtoken from 'jsonwebtoken'
-import { createLogger } from '../../utils/logger.mjs'
+import { Jwt } from '../../auth/Jwt'
+import { JwtPayload } from '../../auth/JwtPayload'
 
 const logger = createLogger('auth')
 
-const jwksUrl = 'https://test-endpoint.auth0.com/.well-known/jwks.json'
+// to verify JWT token signature.
+// To get this URL you need to go to an Auth0 page -> Show Advanced Settings -> Endpoints -> JSON Web Key Set
+const jwksUrl = 'https://dev-3pkrck0uqcdotujb.us.auth0.com/.well-known/jwks.json'
 
-export async function handler(event) {
+export const handler = async (
+  event: CustomAuthorizerEvent
+): Promise<CustomAuthorizerResult> => {
+  logger.info('Authorizing a user', event.authorizationToken)
   try {
     const jwtToken = await verifyToken(event.authorizationToken)
+    logger.info('User was authorized', jwtToken)
 
     return {
       principalId: jwtToken.sub,
@@ -24,7 +35,6 @@ export async function handler(event) {
       }
     }
   } catch (e) {
-    logger.error('User not authorized', { error: e.message })
 
     return {
       principalId: 'user',
@@ -42,18 +52,23 @@ export async function handler(event) {
   }
 }
 
-async function verifyToken(authHeader) {
-  const token = getToken(authHeader)
-  const jwt = jsonwebtoken.decode(token, { complete: true })
-  
+async function verifyToken(authHeader: string): Promise<JwtPayload> {
+  logger.info('Verifying token');
+  const token = getToken(authHeader);
+  const jwt: Jwt = decode(token, { complete: true }) as Jwt;
   const response = await Axios.get(jwksUrl);
   const keys = response.data.keys;
   const signingKeys = keys.find(key => key.kid === jwt.header.kid);
-  
-  if (!signingKeys) throw new Error('Unable to find a signing key');
+  logger.info('Signing keys created successfully ', signingKeys);
+
+  if (!signingKeys) throw new Error('Unable to find a signing key that matches the kid');
   
   const pem = signingKeys.x5c[0];
+
   const cert = `-----BEGIN CERTIFICATE-----\n${pem}\n-----END CERTIFICATE-----`
+  
+  logger.info('cert: ', cert)
+  
   const tokenVerify = verify(token, cert, { algorithms: ['RS256'] }) as JwtPayload
   
   logger.info('Verified token ', tokenVerify)
@@ -61,7 +76,7 @@ async function verifyToken(authHeader) {
   return tokenVerify;
 }
 
-function getToken(authHeader) {
+function getToken(authHeader: string): string {
   if (!authHeader) throw new Error('No authentication header')
 
   if (!authHeader.toLowerCase().startsWith('bearer '))

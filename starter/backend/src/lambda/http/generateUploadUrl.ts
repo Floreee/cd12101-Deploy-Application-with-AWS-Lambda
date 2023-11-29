@@ -1,39 +1,30 @@
 import 'source-map-support/register'
+import {APIGatewayProxyEvent, APIGatewayProxyResult, APIGatewayProxyHandler} from 'aws-lambda'
+import {createLogger} from "../../utils/logger";
+import {getUploadUrl} from "../../businessLayer/todo";
+import {getUserId} from "../utils";
 
-import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda'
-import * as middy from 'middy'
-import { cors, httpErrorHandler } from 'middy/middlewares'
-import { createAttachmentPresignUrl } from '../../handlers/todos'
 
-export const handler = middy(
-  async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+const logger = createLogger('GetUploadUrl-API')
+
+export const handler: APIGatewayProxyHandler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
     const todoId = event.pathParameters.todoId
+    const userId = getUserId(event)
 
-    try {
-      const imgUrl = await createAttachmentPresignUrl(todoId)
+    logger.info('get upload url for ' + todoId)
 
-      return {
-        statusCode: 200,
+    const url = await getUploadUrl(todoId, userId)
+
+    logger.info('received upload url ' + url)
+
+    return {
+        statusCode: 201,
         headers: {
-          'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Credentials': true
         },
         body: JSON.stringify({
-          uploadUrl: imgUrl
+            uploadUrl: url
         })
-      }
-    } catch (error) {
-      return {
-        statusCode: 500,
-        body: JSON.stringify({
-          message: 'server error'
-        })
-      }
     }
-  }
-)
-
-handler.use(httpErrorHandler()).use(
-  cors({
-    credentials: true
-  })
-)
+}

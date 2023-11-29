@@ -1,0 +1,222 @@
+org: floreee
+app: serverless-todo-app-floreee
+service: serverless-todo-app-service
+
+plugins:
+  - serverless-webpack
+  - serverless-iam-roles-per-function
+  - serverless-dynamodb-local
+  - serverless-offline
+  - serverless-s3-local
+
+custom:
+  #configuration for offline testing
+  serverless-offline:
+    httpPort: 3003
+
+  dynamodb:
+    start:
+      port: 8000
+      inMemory: true
+      migrate: true
+    stages:
+      -dev
+
+  s3:
+    host: localhost
+    directory: /tmp
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'us-east-1'}
+
+  # enable tracing with x-ray
+  tracing:
+    lambda: true
+    apiGateway: true
+
+  environment:
+    TODOS_TABLE: ToDos-2-${self:provider.stage}
+    INDEX_NAME: IndexTable-${self:provider.stage}
+    #_X_AMZN_TRACE_ID: '4711'
+    BUCKET_NAME: todo-osde-${self:provider.stage}
+    SIGNED_URL_EXPIRATION: 3000
+
+  iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - codedeploy:*
+      Resource:
+        - '*'
+
+functions:
+
+  # function to authenticate a user
+  Auth:
+    handler: src/lambda/auth/auth0Authorizer.handler
+
+  # function to query todos
+  GetTodos:
+    handler: src/lambda/http/getTodos.handler
+    events:
+      - http:
+          method: get
+          path: todos
+          cors: true
+          authorizer: Auth
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - dynamodb:Scan
+          - dynamodb:Query
+          - dynamodb:GetItem
+        Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.TODOS_TABLE}/index/${self:provider.environment.INDEX_NAME}
+
+  # function to create a new todos
+  CreateTodo:
+    handler: src/lambda/http/createTodo.handler
+    events:
+      - http:
+          method: post
+          path: todos
+          cors: true
+          authorizer: Auth
+          request:
+            schema:
+              application/json: ${file(models/create-todo-request.json)}
+          documentation:
+            summary: Create a new todo
+            description: Create a new todo for the signed in user
+
+    iamRoleStatements:
+       - Effect: Allow
+         Action:
+           - dynamodb:PutItem
+         Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.TODOS_TABLE}
+
+  # function to update an item
+  UpdateTodo:
+    handler: src/lambda/http/updateTodo.handler
+    events:
+      - http:
+          method: patch
+          path: todos/{todoId}
+          cors: true
+          authorizer: Auth
+          request:
+            schema:
+              application/json: ${file(models/update-todo-request.json)}
+          documentation:
+            summary: Update a todo
+            description: Update an existing todo for the signed in user
+
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - dynamodb:UpdateItem
+        Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.TODOS_TABLE}
+
+  #function to delete an item
+  DeleteTodo:
+    handler: src/lambda/http/deleteTodo.handler
+    events:
+      - http:
+          method: delete
+          path: todos/{todoId}
+          cors: true
+          authorizer: Auth
+    iamRoleStatements:
+      - Effect: "Allow"
+        Action:
+          - dynamodb:DeleteItem
+        Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.TODOS_TABLE}
+
+  # function to generate an upload-url
+  GenerateUploadUrl:
+    handler: src/lambda/http/generateUploadUrl.handler
+    events:
+      - http:
+          method: post
+          path: todos/{todoId}/attachment
+          cors: true
+          authorizer: Auth
+
+    # permissions for s3-Bucket, to-do-table and X-Ray
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - s3:PutObject
+          - s3:GetObject
+        Resource: 'arn:aws:s3:::${self:provider.environment.BUCKET_NAME}/*'
+      # needs permission to update a to-do item
+      - Effect: Allow
+        Action:
+          - dynamodb:UpdateItem
+        Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.TODOS_TABLE}
+      - Effect: Allow
+        Action:
+          - xray:PutTraceSegments
+          - xray:PutTelemetryRecords
+        Resource: '*'
+
+resources:
+  Resources:
+    GatewayResponseDefault4XX:
+      Type: AWS::ApiGateway::GatewayResponse
+      Properties:
+        ResponseParameters:
+          gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+          gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+          gatewayresponse.header.Access-Control-Allow-Methods: "'GET,OPTIONS,POST'"
+        ResponseType: DEFAULT_4XX
+        RestApiId:
+          Ref: ApiGatewayRestApi
+
+    TodosTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        AttributeDefinitions:
+          - AttributeName: userId
+            AttributeType: S
+          - AttributeName: createdAt
+            AttributeType: S
+          - AttributeName: todoId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: userId
+            KeyType: HASH
+          - AttributeName: todoId
+            KeyType: RANGE
+        BillingMode: PAY_PER_REQUEST
+        TableName: ${self:provider.environment.TODOS_TABLE}
+        LocalSecondaryIndexes:
+          - IndexName: ${self:provider.environment.INDEX_NAME}
+            KeySchema:
+              - AttributeName: userId
+                KeyType: HASH
+              - AttributeName: createdAt
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL # What attributes will be copied to an index
+
+    ToDoBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:provider.environment.BUCKET_NAME}
+        CorsConfiguration:
+          CorsRules:
+            - AllowedOrigins:
+                - '*'
+              AllowedHeaders:
+                - '*'
+              AllowedMethods:
+                - GET
+                - PUT
+                - POST
+                - DELETE
+                - HEAD
+              MaxAge: 3000
+
